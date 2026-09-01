@@ -1,0 +1,21 @@
+PROJECT 05:RISC-V SoC with Coherent Memory Subsystem
+
+OBJECTIVE: Design a dual-core RV32I SoC in which both processors access shared memory through a simplified coherent memory subsystem. The system shall demonstrate shared-memory and cache-coherence concepts including private cached copies of data, shared-memory access, coherence-state management, and invalidation of stale data. A complete industry-level coherence protocol is not required; students shall implement a simplified two-core coherence mechanism.
+
+RISC-V Core: Students must integrate two synthesizable 32-bit RV32I single-cycle or multicycle cores. Each core shall access shared data through a local cache or memory buffer connected to the coherent shared-memory subsystem. Pipelining, advanced cache hierarchies, and scalable multi-core coherence protocols are not required.
+
+Bus Protocol: The system shall use an AXI4-Lite or AHB-Lite interface for communication between the processors, cache/coherence subsystem, shared memory, and memory-mapped control/status registers.
+
+Main Modules: Two RV32I cores; instruction SRAMs; shared data SRAM; small private data caches or cache buffers; cache tag/data storage; simplified coherence controller; invalidation logic; shared-memory arbiter/interconnect; AXI4-Lite or AHB-Lite control interface; coherence status/debug registers; UART or GPIO status interface.
+
+Expected Operation: Both cores execute programs that access common shared data. When one core modifies a shared-memory location, the coherence subsystem manages the corresponding cached copy in the other core through a simplified invalidation-based mechanism. The system shall demonstrate correct and updated data visibility between both processors after shared-data modifications.
+
+Basic Verification: Verify core memory accesses, cache hit/miss behavior, shared-memory reads and writes, coherence requests, invalidation behavior, simultaneous accesses, updated-data visibility, arbitration, reset, and error conditions. Use a directed, self-checking SystemVerilog testbench with reset tests and representative normal, conflict, and coherence cases.
+
+Physical Design: Run synthesis and the assigned physical-design flow for the complete top-level design: constraints, floorplan, power plan, placement, clock-tree synthesis, routing, and sign-off checks. Report area, timing, power, congestion, DRC, and LVS results using the provided PDK/library and tools.
+
+UVM Verification: Verify concurrent accesses from both cores, cache hit/miss scenarios, shared-memory updates, coherence events, invalidation sequences, simultaneous writes, reset, and error conditions. Use UVM agents, constrained-random sequences, scoreboards, assertions, functional coverage, and code coverage.
+
+FPGA Implementation: Implement the dual-core RISC-V SoC and simplified coherent memory subsystem on the assigned FPGA. Demonstrate shared-data communication in which one core modifies data and the other observes the updated value after the required coherence operation, using UART and LEDs to show core activity, coherence events, cache status, and final results.
+
+FINAL DELIVERABLES: Synthesizable RTL, dual RV32I core integration, instruction/shared SRAM integration, private cache or buffer subsystem, simplified coherence controller, bus/control interface, FPGA demonstration, basic self-checking simulation, UVM verification environment, timing constraints, synthesis and physical-design reports, coverage reports, final layout screenshots, and a brief architecture document.
