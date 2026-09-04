@@ -1,0 +1,59 @@
+# ---- Simulation artifacts ----
+work/
+*.wdb
+xsim.dir/
+*.jou
+xsim*.log
+wave*.wcfg
+vsim.wcfg
+transcript
+vlgt_vars.mk
+*.vcd
+*.fst
+*.vvp
+*.out
+ucdb/
+*.ucdb
+vc_hdrs.h
+csrc/
+*.daidir
+simv*
+ucli.key
+novas*
+verdi*
+
+# ---- Yosys / OpenLane / PD artifacts ----
+build/
+openlane/runs/
+*.gds
+*.lef
+*.spice
+*.def
+*.mag
+*.tcl.bak
+logs/
+*.pdf.generated
+
+# ---- Vivado ----
+*.str
+vivado*.backup.*
+vivado*.jou
+vivado*.log
+.Xil/
+*.bit
+*.ltx
+*.mmi
+hw_handoff/
+ip_user_files/
+.fpga_dont_touch
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Generated memory images (regenerate via make) ----
+sw/*.hex
