@@ -138,6 +138,9 @@ Reset: state ← COH_IDLE, `mirror[*][*] ← I`, `inv_valid0/1 ← 0`, `INV_COUN
 | (any state) | `fill_notify_n && fill_idx_n=k` | (no state change) | `mirror[n][k] ← S` | — |
 
 Notes:
+- **Only shared-SRAM-range stores notify (R9):** the mgr asserts `write_notify` only for cached
+  (`!bypass`) stores, so the coherence FSM never sees an MMIO/UART/GPIO address — dispatch and the
+  mirror are untouched by peripheral traffic.
 - **Notify acceptance only in COH_IDLE** (R1). Because a cache mgr holds `write_notify` until
   `coh_accept`, no notify can ever be lost; simultaneous notifies (cannot occur by bus serialization,
   but defensively) are prioritized core 0, and core 1 keeps holding until accepted.
