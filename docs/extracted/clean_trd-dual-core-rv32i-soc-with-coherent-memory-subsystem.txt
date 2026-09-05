@@ -1,0 +1,603 @@
+Technical Requirements Document (TRD)
+
+Project 05 -- Dual-Core RV32I SoC with Simplified Coherent Memory
+Subsystem
+
+Document ID: TRD-RISCV-SOC-05
+Owner: arafi
+PDK: sky130A | Flow: OpenLane | Bus: AXI4-Lite | FPGA: Arty A7-100T / Zybo
+
+1. Purpose
+
+This TRD defines the technical architecture, module specs, interfaces, protocols, memory map, signal lists,
+and toolchain. It translates the PRD's functional requirements into a concrete, implementable design. It is the
+engineering blueprint.
+?2. System Architecture                                                                      Core 0 Domain
+
+                                       instr fetch                                                                                   RV32I Core 0
+                                              I-SRAM 0                                                                               single-cycle
+                                              (register array)
+                                                                                                                                data req
+
+                                                                                                                                     D-Cache Mgr 0
+                                                                                                                                     (I/S/M state machine)
+
+                                                                                        Core 1 Domain                                      coherence event invalidate
+
+                                                                             RV32I Core 1                                                           Coherence Domain
+                                                                             single-cycle
+                                                                                                                                                                  Coherence Controller
+                                                                                                                                                                  (line-state tracker
+                                                                                                                                                                  + invalidate dispatcher)
+
+          AXI-Lite master                                       instr fetch  data req                                      invalidate coherence event
+
+                                                                I-SRAM 1                                   D-Cache Mgr 1
+                                                                (register array)                           (I/S/M state machine)
+
+                                                                                                               AXI-Lite master
+
+                                                                Interconnect Domain
+
+                                                                                 AXI4-Lite Arbiter
+                                                                                 (round-robin, 2 masters)
+
+                                                                             Address Decoder
+                                                                             (shared SRAM / MMIO /
+                                                                             UART)
+
+          Shared Data SRAM                                      Memory & Peripherals        UART TX/RX                          GPIO LEDs
+          (register array or
+          OpenRAM)                                              MMIO Regs
+                                                                status, counters, doorbell
+
+2.1 Data Flow Summary
+
+ 1. Core fetches instructions from private I-SRAM (never through coherence).
+ 2. Core data accesses go through its private D-cache manager.
+ 3. D-cache manager talks to the shared SRAM via AXI4-Lite.
+ 4. On a write, the coherence controller is notified and invalidates the remote cache line.
+ 5. On a read miss (or post-invalidation), the cache refetches from shared SRAM.
+
+3. Module Specifications
+
+3.1 RV32I Core ( rv32i_core )
+
+Property  Value
+ISA       RV32I (base integer, 37 instructions)
+?Property       Value
+Architecture   Single-cycle
+Data width     32-bit
+Register file  32 × 32-bit (x0 hardwired zero)
+PC
+Reset          32-bit, starts at RESET_PC (configurable, default 0x00000000)
+               Async, active-low rst_n
+
+Instruction Support: All RV32I instructions: addi, slti, sltiu, xori, ori, andi, slli,
+srli, srai, add, sub, sll, slt, sltu, xor, srl, sra, or, and, lb, lh, lw,
+lbu, lhu, sb, sh, sw, beq, bne, blt, bge, bltu, bgeu, jal, jalr, lui,
+auipc, ecall, ebreak .
+
+Interface:
+
+Signal         Direction         Width  Description
+               in                1      Clock
+ clk           in                1      Async active-low reset
+ rst_n         out               32     Instruction fetch address
+ imem_addr     in                32     Instruction word
+ imem_rdata    out               1      Data access request
+ dmem_req      out               1      Write enable
+ dmem_we       out               32     Data address
+ dmem_addr     out               32     Write data
+ dmem_wdata    out               4      Byte-enable mask
+ dmem_wmask    in                32     Read return data
+ dmem_rdata    in                1      Access complete
+ dmem_ack      in                1      Access error
+ dmem_err
+
+Implementation Note: Single-cycle means every instruction completes in 1 clock. The data interface is a
+simple request/ack handshake (not AXI directly -- the D-cache manager translates to AXI-Lite).
+
+3.2 Instruction SRAM ( i_sram )
+
+Property       Value
+Type           Register array (recommended) or OpenRAM macro
+Size           Configurable, e.g. 1 KB (256 words) per core
+Ports          1 read port (instruction fetch)
+Init
+                $readmemh in sim; FPGA: BRAM init from .mem file
+
+Interface: Simple synchronous read; address in, instruction out next cycle (or combinational for register-array
+variant).
+?3.3 Private Data Cache ( d_cache )
+
+Property               Value
+Organization           Direct-mapped
+Lines                  2-4 (configurable; start with 4)
+Line size              1 word (32-bit)
+Fields per line
+Write policy            valid , tag , data[31:0] , state[1:0]
+Coherence states
+                       Write-through, write-allocate
+                       I (2'b00), S (2'b01), M (2'b10)
+
+State Encoding:
+
+State  Code            Meaning
+I      2'b00           Invalid -- line not present or stale
+S      2'b01           Shared -- clean copy from shared SRAM
+M      2'b10           Modified -- this core wrote through; owns latest value
+
+Cache Line Structure:
+
+typedef struct packed {
+ logic valid;
+ logic [W-1:0] tag;
+ logic [31:0] data;
+ logic [1:0] coh_state; // I/S/M
+
+} cache_line_t;
+
+Cache Manager FSM ( d_cache_mgr ):
+?                                               IDLE
+
+                           core data req
+
+        return data, ack    CHECK                    mark line I, ack invalidate
+                           load miss
+load hit (state != I, tag                      invalidate pending     store (any state,
+          match)                                                       write-through)
+
+HIT_READ                   MISS_READ                 WAIT_INVALIDATE                        HIT_WRITE
+
+               send AXI read request                                  send AXI write
+                         AXI_AR
+                                                                                            AXI_AW     local line  M
+
+                           wait for read data                         write data channel
+
+                           AXI_R                                                            AXI_W
+
+               write line (state=S), return                           wait for write response
+                              data
+
+                                      FILL                                                  AXI_B
+
+                                                                      signal coherence controller
+
+                                                                                              NOTIFY_COH
+
+Invalidation Interface (from coherence controller):
+
+Signal                     Direction                 Description
+                           in                        Invalidation request for this cache
+ inv_valid                 in                        Address (or line index) to invalidate
+ inv_addr                  out                       Invalidation complete
+ inv_ack
+
+3.4 Coherence Controller ( coherence_ctrl )
+
+Property       Value
+Role           Track per-line, per-core coherence state; dispatch invalidations
+Line tracking  Mirrors the same line set as the caches (4 lines × 2 cores = 8 state entries)
+Trigger        Any write-through from either core's cache manager
+
+Coherence Controller FSM:
+?                                          IDLE
+
+write_notify from coirfeoNther core has no copy
+                                        (state=I)
+
+            PROCESS_WRITE
+
+            find other core's line for               other core marks line I,
+                      same tag                            returns inv_ack
+
+            INVALIDATE_OTHER
+
+            send inv_valid to other core
+
+                          WAIT_INV_ACK
+
+Per-Line State Table (coherence controller's view):
+
+Line        Core 0 state  Core 1 state                                Action on Core 0 write
+L0          S             S                                           Core1 L0  I
+L0          M             I                                           No invalidation needed
+L0          I             S                                           Core1 L0  I
+L0          I             I                                           No invalidation needed
+
+Interface:                                           Description
+                                                     Core N completed a write to address A
+Signal                    Direction                  Which core wrote (0 or 1)
+                          in (from cache mgr)        Address that was written
+ write_notify             in                         Invalidate this line
+ write_core_id            in
+ write_addr               out (to other cache)
+ inv_valid
+?Signal         Direction              Description
+               out                    Line to invalidate
+ inv_addr      in                     Other cache acknowledges invalidation
+ inv_ack       out                    Current coherence states (for MMIO debug)
+ coh_status
+
+3.5 AXI4-Lite Arbiter ( axi_lite_arbiter )
+
+Property       Value
+Masters        2 (one per core's D-cache manager)
+Slaves         1 (via address decoder)
+Arbitration    Round-robin (or fixed priority)
+Deadlock-free  Yes -- each transaction has bounded completion
+
+Arbiter Logic: At any idle point, grant the master that has been waiting longest. Once a master is granted, it
+holds the bus until its transaction completes (AXI4-Lite: one AW+W+B, one AR+R).
+
+3.6 AXI4-Lite Address Decoder ( axi_lite_decoder )
+
+Address Range                       Target                     Description
+                                    Shared Data SRAM           4 KB shared data
+ 0x0000_0000 - 0x0000_0FFF          MMIO regs                  Status, counters, doorbell
+ 0x0001_0000 - 0x0001_00FF          UART                       TX/RX/data regs
+ 0x0001_0100 - 0x0001_01FF          GPIO/LEDs                  LED output reg
+ 0x0001_0200 - 0x0001_02FF          DECERR                     Unmapped  error response
+
+Other
+
+AXI4-Lite Slave Port (per target):
+
+Channel        Signals
+AW
+W               awvalid, awaddr, awready, awprot
+B               wvalid, wdata, wstrb, wready
+AR              bvalid, bresp, bready
+R               arvalid, araddr, arready, arprot
+                rvalid, rdata, rresp, rready
+
+Response Codes: OKAY (2'b00), SLVERR (2'b10), DECERR (2'b11).
+
+3.7 Shared Data SRAM ( shared_sram )
+
+Property       Value
+Size           4 KB (1024 words)
+?Property   Value
+Type       Register array (recommended) or OpenRAM macro
+Ports      1 RW port (AXI-Lite slave)
+Latency    1 cycle (register array)
+
+3.8 MMIO Registers ( mmio_regs )
+
+Offset     Name         Access    Description
+0x00                    RO        Current coherence states for all lines (both cores)
+0x04        COH_STATUS  RO        Total invalidation events counter
+0x08        INV_COUNT   RO        Total cache hit counter
+0x0C        HIT_COUNT   RO        Total cache miss counter
+0x10        MISS_COUNT  RW        Core-to-core doorbell (write to signal other core)
+0x14        DOORBELL    RW        Control bits (reset counters, enable/disable coherence)
+            CONTROL
+
+3.9 UART ( uart_core )
+
+Property   Value
+Baud       115200 (configurable)
+Data       8N1
+TX         MMIO-writable TX data register
+RX         MMIO-readable RX data register (with status)
+Interface  AXI4-Lite slave
+
+UART Register Map (within UART address space):
+
+Offset     Name                   Access                    Description
+0x00                              W                         Write byte to transmit
+0x04        TX_DATA               R                         TX ready (bit 0)
+0x08        TX_STATUS             R                         Received byte
+0x0C        RX_DATA               R                         RX valid (bit 0)
+            RX_STATUS
+
+3.10 GPIO/LED ( gpio_led )
+
+Property                Value
+Width                   4-8 bits
+Interface               AXI4-Lite slave (single write reg)
+Output
+                         led[7:0] pins
+?LED Assignment:  Meaning
+                 Core 0 active (heartbeat)
+  LED            Core 1 active (heartbeat)
+  LED0           Coherence event pulse (invalidation fired)
+  LED1           Cache hit (blinks on hit)
+  LED2           Cache miss (blinks on miss)
+  LED3           Error (lit on bus error)
+  LED4           Spare / demo status
+  LED5
+  LED6-7
+
+4. Coherence Protocol Specification
+
+4.1 State Transitions
+
+                                                 I
+
+local load miss  fill from
+                              local load after invalidation
+shared SRAM       refetch remote write invalidates this
+
+                                                             copy
+
+                                   S                                   remote write invalidates
+                                                                    (write-through already wrote
+                 local store (write-through to
+                                SRAM)                                      SRAM, no writeback
+                                                                                   needed)
+
+                                                             remote reads (optional, not
+                                                                  required for demo)
+
+                                                                      M
+
+4.2 Transaction Scenarios
+
+Scenario A: Core 0 writes, Core 1 reads (the core demo)
+
+1. Core 0: SW r1, 0(shared_addr)  D-cache 0 write-through             1 line
+2. D-cache 0  AXI write to shared SRAM                                gets new
+3. Coherence controller: Core 0 line  M, notify invalidation of Core
+4. Core 1 D-cache: invalidate line  I
+5. Core 1: LW r2, 0(shared_addr)  miss (state=I)  fetch from SRAM 
+value
+
+Scenario B: Simultaneous writes to same address
+?   1. Both cores issue SW to same addr in same cycle
+   2. Arbiter picks winner (e.g., Core 0 by round-robin priority)
+   3. Core 0 writes  Core 1 line invalidated
+   4. Core 1 writes  Core 0 line invalidated
+   5. Final SRAM value = last writer (Core 1, second in arbiter order)
+   6. Both caches end in I state for that line
+
+Scenario C: No cached copy in other core
+
+   1. Core 0 writes to addr A
+   2. Coherence controller checks: Core 1 has no valid copy of A (state=I)
+   3. No invalidation sent -- Core 0 line  M
+
+5. Memory Map
+
+                          0x0001_0200 - 0x0001_02FF : GPIO
+                                                   LED_REG
+
+                          0x0001_0100 - 0x0001_01FF : UART
+
+               TX_DATA    TX_STATUS            RX_DATA                       RX_STATUS
+
+                          0x0001_0000 - 0x0001_00FF : MMIO
+
+COH_STATUS     INV_COUNT  HIT_COUNT            MISS_COUNT                    DOORBELL   CONTROL
+
+                        0x0000_0000 - 0x0000_0FFF : Shared Data SRAM (4 KB)
+
+                                                               Shared Data
+                                                               1024 words
+
+Note: I-SRAMs are private per core and are NOT memory-mapped in the shared space. They have their
+own private fetch path outside AXI.
+
+6. Interface Contracts
+
+6.1 Core  D-Cache Manager (internal, non-AXI)
+
+Simple request/ack handshake:
+?Signal                                   Dir             Description
+                                         corecache       Data access request
+ req                                     corecache       1=write, 0=read
+ we                                      corecache       Data address
+ addr[31:0]                              corecache       Write data
+ wdata[31:0]                             corecache       Byte enables
+ wmask[3:0]                              cachecore       Read return data
+ rdata[31:0]                             cachecore       Transaction complete
+ ack                                     cachecore       Error (bus fault)
+ err
+
+6.2 D-Cache Manager  AXI-Lite (master port)
+
+Standard AXI4-Lite master signals (5 channels). The D-cache manager implements the AXI-Lite master FSM.
+
+6.3 Coherence Controller  D-Cache Managers (sideband)
+
+Signal               Dir                            Description
+                     cachecoh                       A write completed on this core
+ write_notify        cachecoh                       Address written
+ write_addr          cohcache                       Invalidate this line
+ inv_req             cohcache                       Which line to invalidate
+ inv_line_idx        cachecoh                       Invalidation done
+ inv_ack
+
+7. Clocking & Reset
+
+Domain                                   Clock           Source
+SoC (all cores, caches, coherence, bus,
+memory)                                   core_clk       Single clock, synchronous design
+
+FPGA                                      core_clk from  Board ref clock (100/125 MHz)  MMCM  50
+                                                         MHz
+UART                                     MMCM
+                                                         Baud divider from core_clk
+                                          core_clk
+
+Reset:
+
+· Single async active-low rst_n .                                                          core_clk .
+
+· Reset synchronizer at top level (2-flop synchronizer) to release reset synchronously to
+
+· On reset: all caches  I, all counters  0, all state regs  known, PC  RESET_PC .
+
+8. Timing Constraints (SDC)
+
+   # Core clock -- start conservative for sky130
+?create_clock -name core_clk -period 50.000 [get_ports clk]       uart_tx_reg/D]
+# 50 ns = 20 MHz target (tighten to 25 ns / 40 MHz if closes)
+# Input/output delays (conservative, refine after placement)
+set_input_delay -max 10.0 -clock core_clk [all_inputs]
+set_output_delay -max 10.0 -clock core_clk [all_outputs]
+# False path / multicycle if needed (e.g., UART baud counter)
+# set_false_path -from [get_pins uart_baud_reg/Q] -to [get_pins
+# Asynchronous reset
+set_false_path -from [get_ports rst_n]
+
+FPGA SDC (Xilinx Vivado):
+
+create_clock -name sys_clk -period 10.0 [get_ports clk_in]
+# 100 MHz Arty ref  MMCM  50 MHz core_clk (20 ns)
+create_generated_clock -name core_clk [get_pins mmcm/clk_out0]
+
+9. Toolchain
+
+Stage           Tool                          Notes
+                                              Directed TB + UVM (UVM needs a UVM-capable simulator -- use
+RTL simulation  Icarus Verilog / Verilator /
+                Vivado XSim                    verilator --UVM or a commercial sim if available, or xrun /
+                                               vsim ).
+ASIC            Yosys (via OpenLane)           sky130_fd_sc_hd standard cells.
+synthesis
+                OpenROAD (via OpenLane)       Floorplan  PDN  placement  CTS  routing.
+ASIC physical   Magic + Netgen (via
+design          OpenLane) / KLayout           OpenLane runs these; KLayout for visual LVS.
+                Xilinx Vivado
+DRC / LVS                                     Arty A7-100T: xc7a100t; Zybo: xc7z010/xc7z020 (PL-only).
+                Vivado XSim / Verilator
+FPGA                                          Behavioral sim before board.
+synthesis       RISC-V GCC ( riscv32-
+                unknown-elf-gcc )             Compile C/asm  hex for I-SRAM init.
+FPGA
+simulation
+
+RISC-V
+toolchain
+
+10. Directory Structure
+
+   riscv_soc_coh/
+    rtl/
+     core/
+      rv32i_core.sv
+      reg_file.sv
+      alu.sv
+      control_unit.sv
+?  memory/
+   i_sram.sv
+   shared_sram.sv
+   sram_reg_array.sv
+  cache/
+   d_cache.sv
+   d_cache_mgr.sv
+  coherence/
+   coherence_ctrl.sv
+  bus/
+   axi_lite_arbiter.sv
+   axi_lite_decoder.sv
+   axi_lite_if.sv
+  peripheral/
+   mmio_regs.sv
+   uart_core.sv
+   gpio_led.sv
+  top/
+  riscv_soc_top.sv
+ tb/
+  directed/
+   tb_directed.sv
+  uvm/
+  env/
+  agents/
+  sequences/
+  scoreboard/
+  tb_uvm.sv
+ sw/
+  core0_prog.c / .s
+  core1_prog.c / .s
+  linker.ld
+ constraints/
+  soc.sdc
+  fpga.xdc
+ openlane/
+  config.json
+ fpga/
+  vivado/
+ docs/
+  architecture.md
+ Makefile
+
+11. Module Dependency Graph (build order)
+
+alu.sv  reg_file.sv    control_unit.sv             sram_reg_array.sv  d_cache.sv
+        rv32i_core.sv                                                 d_cache_mgr.sv
+                                        i_sram.sv  shared_sram.sv                     coherence_ctrl.sv  axi_lite_arbiter.sv  axi_lite_decoder.sv  mmio_regs.sv  uart_core.sv  gpio_led.sv
+
+                                                                                      riscv_soc_top.sv
+?Build order: ALU  reg_file  control_unit  rv32i_core  i_sram  sram_reg_array  shared_sram 
+d_cache  d_cache_mgr  coherence_ctrl  axi_lite_arbiter  axi_lite_decoder  mmio_regs  uart_core 
+gpio_led  riscv_soc_top.
+
+12. Verification Architecture
+
+12.1 Directed TB
+
+Self-checking testbench in SystemVerilog:
+
+  · Instantiates riscv_soc_top .
+  · Preloads I-SRAMs with test programs ( $readmemh ).
+
+  · Monitors UART output, MMIO counters, and shared SRAM.
+  · Self-checks: asserts expected values after each coherence scenario.
+  · Test cases: reset, normal read/write, cache hit, cache miss, cross-core invalidation, simultaneous write,
+
+    error/unmapped access.
+
+12.2 UVM Environment
+
+Core 0 Sequences                       uvm_env                                              Core 1 Sequences
+(randomized reads/writes)                                                                   (randomized reads/writes)
+
+                  Agent 0              Agent 1                Coherence Monitor
+                  (Core 0 AXI master)  (Core 1 AXI master)    (snoops invalidate bus)
+
+                                       Scoreboard                                           Coverage Collector
+                                       (predicts shared SRAM                                (states, events, hit/miss)
+                                       state)
+
+UVM Components:
+
+  · Agents (×2): AXI4-Lite master agent per core -- driver, monitor, sequencer.
+  · Sequences: constrained-random read/write sequences to shared SRAM addresses.
+  · Scoreboard: predicts expected shared SRAM value based on transaction order; compares with actual.
+  · Coherence Monitor: independently observes invalidation events; verifies invalidations fire on every cross-
+
+    core write.
+  · Coverage: functional coverage for coherence states (I/S/M per core per line), hit/miss, invalidation count,
+
+    simultaneous-write winner, error responses.
+
+13. Physical Design Targets (sky130A / OpenLane)
+
+Parameter         Target
+Clock             20 MHz minimum (50 ns)
+Core utilization  50-60%
+Die area          As small as design allows (let OpenLane auto-size or set to ~500×500 µm)
+Metal layers      sky130: up to 5/6 metal layers
+?Parameter    Target
+DRC          0 violations
+LVS          Clean (netlist match)
+Congestion   No overflow (>100% routing) on any layer
+
+14. FPGA Targets
+
+Parameter    Arty A7-100T                              Zybo (PL-only)
+Device       xc7a100t-1csg324                          xc7z010-1clg400 / xc7z020-1clg400
+Core clock   50 MHz (MMCM from 100 MHz)                50 MHz (MMCM from 125/100 MHz)
+I-SRAM                                                 BRAM
+Shared SRAM  BRAM (initialized from .mem )             BRAM or distributed RAM
+UART                                                   Onboard USB-UART
+LEDs         BRAM or distributed RAM                   4 onboard
+Constraints  Onboard USB-UART (UART pins)
+             4 onboard + Pmod if needed                 .xdc (PL-only, no PS)
+
+              .xdc
+?

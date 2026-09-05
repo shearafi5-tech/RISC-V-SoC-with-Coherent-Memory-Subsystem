@@ -1,0 +1,522 @@
+Implementation Plan
+
+Project 05 -- Dual-Core RV32I SoC with Simplified Coherent Memory
+Subsystem
+
+Document ID: IMPL-RISCV-SOC-05
+Owner: arafi
+Timeline: 5 days (Sep 1-5, 2026)
+PDK: sky130A | Flow: OpenLane | Bus: AXI4-Lite | FPGA: Arty A7-100T / Zybo
+
+1. Purpose
+
+This is the execution document. It breaks the 5-day timeline into granular tasks with:
+
+  � What to do (the task)
+  � Dependencies (what must be done first)
+  � Deliverable (the concrete output)
+  � Acceptance check (how to know it's correct)
+  � Time budget (how many hours)
+
+If the PRD defines what and the TRD defines how, this document defines when and in what order.
+
+2. Time Budget Overview
+
+                           5-Day Time Allocation (approx hours)
+
+              14%       36%
+23%
+                                              RTL Design (Day 1-2) [16]
+                                              Verification (Day 3-4) [12]
+                                              Synthesis + PD (Day 4-5) [10]
+                                              FPGA + Docs (Day 5) [6]
+
+                   27%
+Day            Focus                                            Hours  Key Risk
+Day 1 (Sep 1)  Logic design + core RTL                          8      CPU bugs
+Day 2 (Sep 2)  Cache + coherence + bus RTL                      8      Coherence FSM bugs
+Day 3 (Sep 3)  Top integration + directed TB + synth smoke      8      Integration bugs, synth failures
+Day 4 (Sep 4)  UVM + OpenLane physical design                   8      UVM scope creep, PD issues
+Day 5 (Sep 5)  FPGA + sign-off + documentation                  6      FPGA pin/timing, doc time
+
+3. Day 1 -- Logic Design + Core RTL
+
+3.1 Morning (4 hours): Logic Design on Paper
+
+Task                           ID Dependencies Deliverable             Acceptance                        Hours
+                                                                                                         0.5
+Design ALU logic table         T1.1 --         ALU operation truth     All RV32I ops defined with        1.0
+                                               table                   select encoding                   0.5
+Design D-cache FSM state                                                                                 0.5
+diagram                        T1.2 --         FSM diagram on paper    All states, transitions, reset    1.0
+Design coherence controller                                            values defined                    0.5
+FSM
+Design round-robin arbiter     T1.3 T1.2       FSM diagram on paper    I/S/M transitions + invalidation
+Draw system block diagram +                                            path defined
+memory map
+Finalize Day-1 decisions (see  T1.4 --         Logic table             2-master arbiter truth table
+below)
+                               T1.5 T1.1-T1.4  Block diagram +         All modules, connections,
+                                               memory map              addresses shown
+
+                               T1.6 --         Decision record         7 decisions documented
+
+Day-1 decisions to finalize (from analysis):
+
+ 1. Core: single-cycle (confirmed)
+ 2. Bus: AXI4-Lite (confirmed)
+ 3. Write policy: write-through (confirmed)
+ 4. Coherence: I/S/M 3-state (confirmed)
+ 5. Cache: 4 lines, direct-mapped, 1 word/line
+ 6. Reset: async active-low, single domain
+ 7. SRAM: register arrays for I-SRAM; shared SRAM as register array (avoid OpenRAM integration cost)
+
+3.2 Afternoon (4 hours): Core RTL
+
+Task               ID          Dependencies Deliverable              Acceptance                          Hours
+                                                                     Compiles, simple test in TB         0.5
+Write alu.sv       T1.7 T1.1                   rtl/core/alu.sv
+                                                                     2R/1W, x0=0, compiles               0.5
+Write reg_file.sv  T1.8 --                      rtl/core/
+                                               reg_file.sv
+Write
+                   T1.9 T1.1                    rtl/core/            Decodes all RV32I instructions 1.0
+ control_unit.sv                               control_unit.sv
+                                                                     Integrates ALU+RF+CU+PC+data IF 1.0
+Write              T1.10 T1.7-T1.9              rtl/core/                                                              1.0
+                   T1.11 T1.10                 rv32i_core.sv
+ rv32i_core.sv
+Task                ID  Dependencies Deliverable                           Acceptance                   Hours
+
+Write simple core                         tb/                              Executes a few instructions
+testbench                                tb_core_smoke.sv                  (ADD, ADDI, SW, LW), checks
+                                                                           reg values
+
+Day 1 Exit Criteria
+
+          ALU, reg_file, control_unit, rv32i_core all compile
+          Core executes at least: ADDI, ADD, LW, SW, BEQ correctly in sim
+          All 7 design decisions documented
+          FSM diagrams on paper (keep these -- you'll reference them)
+
+4. Day 2 -- Cache + Coherence + Bus RTL
+
+4.1 Morning (4 hours): Memory + Cache
+
+Task                    ID Dependencies Deliverable                        Acceptance                   Hours
+                                                                                                        0.5
+Write                   T2.1 --           rtl/memory/                      Parameterized depth/         0.25
+                                         sram_reg_array.sv                 width, sync R/W
+ sram_reg_array.sv
+                        T2.2 T2.1         rtl/memory/                      1KB private, read-only
+(generic)                                i_sram.sv                         port
+
+Instantiate i_sram.sv   T2.3 T2.1         rtl/memory/                      4KB shared, 1 RW port 0.25
+                                         shared_sram.sv
+using generic
+                        T2.4 T1.2         rtl/cache/                       4 lines, valid/tag/data/ state fields 0.5
+Instantiate                              d_cache.sv
+
+ shared_sram.sv using                     rtl/cache/                       FSM implements hit/
+                                         d_cache_mgr.sv
+generic                 T2.5 T2.4, T1.2                                    miss/write/invalidate,       2.0
+
+Write d_cache.sv (line                                                     AXI-Lite master port
+
+storage)
+
+Write d_cache_mgr.sv
+
+(FSM)
+
+                                          tb/                              Hit returns data, miss
+                                         tb_cache_smoke.sv
+Test d_cache_mgr in isolation T2.6 T2.5                                    fetches via AXI, write       0.5
+
+                                                                           updates SRAM
+
+4.2 Afternoon (4 hours): Coherence + Bus + Peripherals
+
+Task                    ID  Dependencies Deliverable                       Acceptance                   Hours
+                                                                                                        1.0
+Write                   T2.7 T1.3         rtl/coherence/                   Tracks I/S/M,                0.5
+                                         coherence_ctrl.sv                 dispatches                   0.5
+ coherence_ctrl.sv                                                         invalidation on              0.5
+                                                                           write_notify
+Test coherence_ctrl in  T2.8 T2.7         tb/tb_coh_smoke.sv
+isolation               T2.9 T1.4                                          Write from core 0
+                                          rtl/bus/                         invalidates core 1 line
+Write                                    axi_lite_arbiter.sv
+                                                                           Round-robin, 2
+ axi_lite_arbiter.sv                                                       masters, deadlock-
+                                                                           free
+Write                   T2.10 --          rtl/bus/
+                                         axi_lite_decoder.sv               Routes to SRAM/
+ axi_lite_decoder.sv                                                       MMIO/UART/GPIO,
+                                                                           DECERR on
+                                                                           unmapped
+Task                        ID    Dependencies Deliverable               Acceptance                       Hours
+                                                                                                          0.5
+Write mmio_regs.sv          T2.11 --          rtl/peripheral/            AXI-Lite slave,                  0.75
+                                             mmio_regs.sv                status/counters/                 0.25
+                                                                         doorbell/control
+Write uart_core.sv          T2.12 --          rtl/peripheral/
+Write gpio_led.sv           T2.13 --         uart_core.sv                AXI-Lite slave,
+                                                                         115200 8N1 TX/RX
+                                              rtl/peripheral/
+                                             gpio_led.sv                 AXI-Lite slave, LED
+                                                                         output reg
+
+Day 2 Exit Criteria
+
+          All memory, cache, coherence, bus, peripheral modules compile
+          d_cache_mgr passes isolation test (hit/miss/write)
+          coherence_ctrl passes isolation test (invalidation works)
+          AXI arbiter + decoder compile and route correctly
+
+5. Day 3 -- Top Integration + Directed TB + Synth Smoke
+
+5.1 Morning (4 hours): Integration + Directed TB
+
+Task                        ID Dependencies Deliverable                  Acceptance                       Hours
+Write                                                                                                     1.5
+                            T3.1 all RTL   rtl/top/                      Instantiates and wires
+ riscv_soc_top.sv                         riscv_soc_top.sv               everything; compiles
+
+Write AXI-Lite interface    T3.2 --        rtl/bus/                      SV interface for all AXI- Lite connections 0.5
+definitions                               axi_lite_if.sv
+                                                                         Reset, single-core
+Write tb_directed.sv        T3.3 T3.1      tb/directed/                  access, hit, miss, cross- 1.5
+                            T3.4 T3.3     tb_directed.sv                 core coherence
+test cases 1-5
+                                          working sim                    First 5 directed tests pass 0.5
+Debug integration
+
+5.2 Afternoon (4 hours): More Tests + Synth Smoke
+
+Task                  ID Dependencies Deliverable                        Acceptance                       Hours
+                                                                         Stale prevention, simultaneous   1.0
+Write directed test   T3.5 T3.4           extended                       write, no-cached-copy, error,    1.0
+cases 6-10                                                               counters                         0.5
+                                           tb_directed.sv                                                 1.0
+                                                                         Self-checking, PASS flag at end  0.5
+Debug all directed    T3.6  T3.5          all 10 tests pass
+tests                 T3.7  T3.4                                         Simple asm that does the
+                      T3.8  T3.1           sw/core0.hex , sw/            coherence demo scenario
+Write demo programs   T3.9  T3.8          core1.hex
+(core0/core1 .hex)                                                       Synthesizes with 0 errors, 0
+                                          Yosys log                      latches, all mapped
+Yosys synthesis                           clean synth                    Re-synth until clean
+smoke test
+
+Fix any synth issues
+
+Day 3 Exit Criteria
+
+      riscv_soc_top integrated and compiles
+      All 10 directed test cases pass (self-checking)
+      Demo program hex files generated
+      Yosys synthesis smoke test passes (0 errors, 0 latches)
+      This is the critical gate -- if synth is clean here, Day 5 is much easier
+
+Transparency note: Day 3 is the pivot day. If the directed tests don't pass, do NOT proceed to UVM or
+physical design. Fix the core behavior first. A passing directed TB is your truth source.
+
+6. Day 4 -- UVM + OpenLane Physical Design
+
+6.1 Morning (4 hours): UVM Environment
+
+Task                            ID Dependencies Deliverable                    Acceptance            Hours
+                                                                                                     0.25
+Write axi_lite_if.sv for UVM    T4.1 T3.2              tb/uvm/                 SV interface for      0.25
+                                                      axi_lite_if.sv           UVM connection        1.0
+Write axi_lite_seq_item.sv                                                                           0.75
+                                T4.2 --               transaction object       addr, data, we,
+Write                                                                          wmask, response       0.75
+                                T4.3 T4.2             driver + sequencer +                           0.5
+ axi_lite_master_agent.sv                             monitor                  Drives AXI-Lite       0.5
+                                                                               transactions
+Write sequences (core0, core1,  T4.4 T4.3             sequences
+coherence_vseq)                                                                Randomized read/
+                                T4.5 T4.3             scoreboard               write to shared
+Write                           T4.6 --               monitor                  addrs
+                                T4.7 --               covergroups
+ shared_sram_scoreboard.sv                                                     Predicts SRAM
+                                                                               state, compares
+Write coherence_monitor.sv                                                     with monitor
+
+Write coverage_collector.sv                                                    Observes
+                                                                               invalidation events
+
+                                                                               Coherence states,
+                                                                               hit/miss, inv count,
+                                                                               error
+
+6.2 Afternoon (4 hours): UVM Run + OpenLane
+
+Task                    ID  Dependencies Deliverable               Acceptance                        Hours
+Assemble UVM env +                                                                                   0.5
+test                    T4.8 T4.1-T4.7      tb/uvm/tb_uvm.sv Env instantiates all components         1.5
+                                                                                                     0.5
+Run UVM, debug          T4.9 T4.8           UVM logs               1000+ random txns pass,           0.25
+                        T4.10 T4.9                                 scoreboard matches                0.25
+Generate coverage       T4.11 --            coverage report        Functional >=90%, code >=90%      1.0
+report                  T4.12 T3.8                                 line
+                        T4.13 T4.11, T4.12   constraints/
+Write SDC constraints                       soc.sdc                Clock 50ns, I/O delays defined
+                                             openlane/
+Write OpenLane                              config.json            Design name, files, clock, PDK,
+                                                                   utilization
+ config.json                                OpenLane output
+                                                                   Synth + floorplan + PDN + place
+Run OpenLane full flow                                             + CTS + route + sign-off
+Day 4 Exit Criteria
+
+          UVM environment runs, scoreboard passes 1000+ random txns
+          Coverage report generated (functional + code)
+          SDC written
+          OpenLane config written
+          OpenLane flow runs to completion (may have DRC/timing issues to fix Day 5)
+
+7. Day 5 -- Sign-off + FPGA + Documentation
+
+7.1 Morning (4 hours): Sign-off + FPGA
+
+Task                          ID    Dependencies   Deliverable             Acceptance                    Hours
+                              T5.1  T4.13          DRC report              0 violations (fix if needed)  0.5
+Check DRC (Magic)             T5.2  T4.13          LVS report              Clean netlist match           0.5
+                              T5.3  T4.13          timing report           WNS >= 0 (setup + hold)       0.25
+Check LVS (Netgen)
+                              T5.4 T5.1            layout PNG              GDS visual screenshot         0.25
+Check timing (STA)
+                              T5.5 --               constraints/           Pins, clock, I/O standards    0.5
+Capture layout screenshot     T5.6 --              fpga.xdc
+(KLayout)                     T5.7 T5.5, T5.6                              MMCM generates 50 MHz from board ref 0.5
+                                                    rtl/top/               No negative slack, bitstream generated 1.0
+Write FPGA .xdc                                    fpga_top.sv             UART shows coherence, LEDs blink 0.5
+
+constraints                                         .bit file
+
+Add MMCM wrapper for
+FPGA
+
+Vivado synth + impl +
+bitstream
+
+Program board + run demo T5.8 T5.7                 live demo / video
+
+7.2 Afternoon (2-3 hours): Documentation + Cleanup
+
+Task                          ID     Dependencies Deliverable              Acceptance                    Hours
+                                                                                                         1.0
+Write architecture.md T5.9 all                      docs/                  Covers all modules,           0.5
+                                                   architecture.md         coherence, memory map,        0.5
+Organize reports (synth, PD,  T5.10  T4.10, T5.1-                          results
+coverage)                            T5.4          organized report files
+                                                                           All reports in reports/
+Final deliverables checklist  T5.11 all            checklist
+                                                                           folder
+
+                                                                           All PRD deliverables
+                                                                           checked
+
+Day 5 Exit Criteria
+
+          DRC: 0 violations
+          LVS: clean
+          Timing: WNS >= 0
+          Layout screenshot captured
+          FPGA bitstream generated
+          Board demo runs (UART + LEDs show coherence)
+          Architecture document complete
+          All deliverables checked off
+
+8. Task Dependency Graph (Critical Path)
+
+                                                                                 Day 1: Logic Design + Core
+                                                                                 RTL
+
+                        Day 2: Cache + Coherence
+                        + Bus
+
+                        Day 3: Top Integration
+
+                        Day 3: Directed TB (10
+                        tests)
+
+                        Day 3: Yosys Smoke Synth
+
+                        Day 4: OpenLane Flow
+
+Day 4: UVM Environment  Day 5: DRC + LVS + Timing                                                            Day 5: FPGA Synth +
+                                                                                                             Bitstream
+
+Day 5: Coverage Report  Day 5: Layout Screenshot                                                             Day 5: Board Demo
+
+                                                                                 Day 5: Documentation
+
+Critical path: T1  T2  T3a  T3b  T3c  T4b  T5b  T5f.
+Any slip on this path slips the whole project.
+Parallelizable on Day 4: UVM (T4a) and OpenLane (T4b) can run in parallel if you have two terminals/
+machines.
+9. Daily Standup Checklist (use these each morning)
+
+Day 1 Standup
+
+          Do I have a known-good RV32I core design to reference?
+          Have I finalized all 7 design decisions?
+          Is my toolchain ready (simulator, Yosys, Vivado, RISC-V GCC)?
+
+Day 2 Standup
+
+          Is the core from Day 1 passing its smoke test?
+          Do I have the FSM diagrams from Day 1 to reference?
+          Am I keeping the coherence mechanism simple (3-state, write-through)?
+
+Day 3 Standup
+
+          Are all modules individually tested before integration?
+          Am I running the Yosys smoke test today (not skipping it)?
+
+Day 4 Standup
+
+          Is the directed TB fully passing before I start UVM?
+          Is the OpenLane config ready to run?
+          Am I keeping UVM minimal (not over-engineering)?
+
+Day 5 Standup
+
+          Are DRC/LVS/timing clean or do I have a plan to fix?
+          Are the FPGA constraints correct for my board?
+          Do I have time allocated for documentation?
+
+10. Risk Contingency Plan
+
+If this happens...          Then...
+
+Core doesn't work by end    Use a simpler known-good open-source single-cycle core; don't debug from scratch.
+of Day 1
+                            Stop. Fix the RTL. Do not proceed to UVM/PD until directed tests pass.
+Directed TB fails on Day 3
+                            Fix unsynthesizable constructs (latches, initial blocks, $display). This is a hard gate.
+Yosys synth fails on Day 3
+                            Usually floorplan/routing. Adjust utilization, re-run. If persistent, simplify the design (fewer
+OpenLane DRC violations     cache lines).
+on Day 4-5
+                            Lower clock to 25 MHz (40 ns). If still failing, check critical path -- likely ALU or cache tag
+Timing doesn't close        compare. Consider multicycle data path as last resort.
+(WNS < 0)
+                            Prioritize: keep the directed TB (it's the required baseline). Submit UVM partially working with
+UVM doesn't work by end     coverage report from what ran.
+of Day 4
+                            If Vivado timing fails, lower core clock to 25 MHz. If pin issues, double-check board
+FPGA doesn't work on        schematic. If all else fails, show behavioral sim demo as fallback.
+Day 5
+                            Architecture doc is required. Write a minimal version (block diagram + module list + coherence
+Run out of time for docs    explanation + results). Better minimal than missing.
+11. Deliverables Tracking Matrix  Task ID     Day  Status
+                                  T1.7
+  Deliverable                     T1.8        1    [ ]
+                                  T1.9
+  alu.sv                          T1.10       1    [ ]
+  reg_file.sv                     T2.1
+  control_unit.sv                 T2.2        1    [ ]
+  rv32i_core.sv                   T2.3
+  sram_reg_array.sv               T2.4        1    [ ]
+  i_sram.sv                       T2.5
+  shared_sram.sv                  T2.7        2    [ ]
+  d_cache.sv                      T2.9
+  d_cache_mgr.sv                  T2.10       2    [ ]
+  coherence_ctrl.sv               T2.11
+  axi_lite_arbiter.sv             T2.12       2    [ ]
+  axi_lite_decoder.sv             T2.13
+  mmio_regs.sv                    T3.1        2    [ ]
+  uart_core.sv                    T3.2
+  gpio_led.sv                     T3.3-T3.6   2    [ ]
+  riscv_soc_top.sv                T3.7
+  axi_lite_if.sv                  T3.8-T3.9   2    [ ]
+                                  T4.1-T4.8
+  Directed TB (10 tests)          T4.9-T4.10  2    [ ]
+  Demo programs (.hex)            T4.11
+  Yosys synth clean               T4.12       2    [ ]
+  UVM env                         T4.13
+  UVM run + coverage              T5.1        2    [ ]
+  SDC constraints                 T5.2
+  OpenLane config                 T5.3        2    [ ]
+  OpenLane full flow              T5.4
+  DRC clean                       T5.5        2    [ ]
+  LVS clean                       T5.6
+  Timing met                      T5.7        3    [ ]
+  Layout screenshot               T5.8
+  FPGA .xdc                       T5.9        3    [ ]
+  FPGA MMCM wrapper               T5.10
+  FPGA bitstream                              3    [ ]
+  Board demo
+  Architecture doc                            3    [ ]
+  Reports organized
+                                              3    [ ]
+
+                                              4    [ ]
+
+                                              4    [ ]
+
+                                              4    [ ]
+
+                                              4    [ ]
+
+                                              4    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+
+                                              5    [ ]
+Deliverable                        Task ID  Day                                                Status
+Final checklist                    T5.11
+                                            5                                                  [ ]
+
+12. Definition of Done (Project Complete When ALL Are True)
+
+          All RTL modules written, compile, and are synthesizable (0 Yosys errors, 0 latches)
+          Directed self-checking TB: all 10 test cases pass
+          UVM: scoreboard passes 1000+ random transactions
+          Coverage: functional >=90%, code >=90% line
+          OpenLane flow completes: DRC 0 violations, LVS clean
+          Timing: WNS >= 0 (setup and hold met)
+          Reports captured: area, timing, power, congestion, DRC, LVS
+          Layout screenshot captured (KLayout)
+          FPGA: bitstream generated, board running
+          FPGA demo: UART shows coherence sequence, LEDs show activity
+          Architecture document delivered
+          All deliverables from PRD checked off
+
+13. Quick Reference - Key Files    Purpose                                                     Created Day
+                                   RV32I single-cycle CPU                                      1
+  File                             Cache controller FSM + AXI master                           2
+                                   Coherence controller                                        2
+  rtl/core/rv32i_core.sv           Top-level integration                                       3
+  rtl/cache/d_cache_mgr.sv         Self-checking directed TB                                   3
+  rtl/coherence/coherence_ctrl.sv  UVM testbench top                                           4
+  rtl/top/riscv_soc_top.sv         ASIC timing constraints                                     4
+  tb/directed/tb_directed.sv       OpenLane configuration                                      4
+  tb/uvm/tb_uvm.sv                 FPGA pin constraints                                        5
+  constraints/soc.sdc              FPGA top with MMCM                                          5
+  openlane/config.json             Architecture document                                       5
+  constraints/fpga.xdc
+  rtl/top/fpga_top.sv
+  docs/architecture.md
+

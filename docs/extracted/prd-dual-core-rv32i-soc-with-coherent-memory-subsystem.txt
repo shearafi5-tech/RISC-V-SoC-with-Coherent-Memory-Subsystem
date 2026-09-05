@@ -1,0 +1,282 @@
+Product Requirements Document (PRD)
+
+Project 05 -- Dual-Core RV32I SoC with Simplified Coherent Memory
+Subsystem
+
+Document ID: PRD-RISCV-SOC-05
+Owner: arafi
+Timeline: 5 days
+PDK: sky130A (OpenLane)
+Bus: AXI4-Lite
+FPGA: Arty A7-100T or Zybo Zynq (PL-only)
+
+1. Purpose
+
+This PRD defines what the product must do, who it is for, and what conditions define acceptance. It is
+deliberately non-implementation -- the TRD and Implementation Plan cover how.
+
+The product is an educational-grade dual-core RISC-V SoC that demonstrates shared-memory and cache-
+coherence concepts through a simplified invalidation-based mechanism. It is not a production chip. It is a
+proof-of-concept system that a grader can verify in simulation, in physical layout, and on FPGA hardware.
+
+2. Background & Problem Statement
+
+In modern multi-core systems, each processor maintains private cached copies of shared data. When one
+core modifies shared data, other cores' cached copies become stale. A coherence protocol ensures all cores
+observe a consistent view of memory.
+
+Industry protocols (MESI, MOESI, directory-based snooping) are complex. This product distills the concept to
+its essence: two cores, three cache states (I/S/M), and invalidation-on-write -- enough to prove the student
+understands why coherence is needed and how invalidation makes updated data visible.
+
+3. Target Users & Stakeholders
+
+Stakeholder      Role         What they need from the product
+                 Designer &
+Student (arafi)  implementer  A working design that passes all verification + physical-design + FPGA gates.
+
+Course           Grader       Visible proof of concept-demonstration: sim passing, GDS clean, FPGA demo
+evaluator                     running.
+Future reader    Learner      An understandable, documented design showing coherence fundamentals.
+4. Product Overview
+
+                                     I-SRAM 0 (private)                       SoC     I-SRAM 1 (private)                            Shared Data SRAM
+                                     D-Cache 0 (I/S/M)   Core 1 (RV32I single-cycle)
+                                                                                                                                    MMIO: status regs,
+        Core 0 (RV32I single-cycle)                                                                       AXI4-Lite Interconnect +  counters, doorbell
+                                                                                                          Arbiter
+                                                                                                                                    UART + GPIO/LEDs
+                                                                                      D-Cache 1 (I/S/M)
+
+                                                         Coherence Controller
+
+5. Functional Requirements
+
+FR-1: Dual RV32I Cores
+
+ID      Requirement                                                                                                                 Priority
+FR-1.1  The SoC shall contain exactly two RV32I base-integer cores.                                                                 MUST
+FR-1.2  Each core shall be single-cycle (or multicycle -- single-cycle preferred).                                                  MUST
+FR-1.3  Each core shall execute from a private instruction SRAM.                                                                    MUST
+FR-1.4  Cores shall be independently resettable to a known PC.                                                                      MUST
+FR-1.5  Each core shall access shared data through its private data cache, not directly.                                            MUST
+
+FR-2: Private Data Caches
+
+ID      Requirement                                                                                                                 Priority
+FR-2.1  Each core shall have a private data cache (direct-mapped, 2-4 lines, 1 word/line).                                          MUST
+FR-2.2  Each cache line shall store tag, data word, and coherence state (I/S/M).                                                    MUST
+FR-2.3  Cache shall use write-through policy.                                                                                       MUST
+FR-2.4  On a load miss, the cache shall fetch from shared SRAM and transition IS.                                                   MUST
+FR-2.5  On a store hit/miss, the cache shall write through to shared SRAM and transition M.                                         MUST
+
+FR-3: Coherence Subsystem
+
+ID      Requirement                                                                                        Priority
+FR-3.1                                                                                                     MUST
+FR-3.2  The system shall implement a 3-state coherence model (I, S, M).
+                                                                                                           MUST
+FR-3.3  When a core writes a shared line, the coherence controller shall invalidate the other core's
+FR-3.4  cached copy of that line (I).                                                                      MUST
+
+        After invalidation, the invalidated core's next read to that line shall refetch the updated value  MUST
+        from shared SRAM.                                                                                  MUST NOT (by
+                                                                                                           design)
+        The coherence controller shall maintain per-line state for both cores.
+
+FR-3.5 The system shall NOT implement full MESI/MOESI or snooping bus.
+FR-4: Bus & Interconnect
+
+ID       Requirement                                                                                           Priority
+FR-4.1   The system shall use AXI4-Lite for all processor  memory  control communication.                      MUST
+FR-4.2   An arbiter shall serialize concurrent master requests to the shared SRAM.                             MUST
+FR-4.3   The arbiter shall use round-robin (or fixed priority) and be deadlock-free.                           MUST
+FR-4.4   Simultaneous writes to the same address shall produce a deterministic winner.                         MUST
+
+FR-5: Memory & Memory Map
+
+ID       Requirement                                                                                           Priority
+FR-5.1   Shared data SRAM shall be a single, unified source of truth.                                          MUST
+FR-5.2   Instruction SRAMs shall be private per core and shall NOT pass through coherence.                     MUST
+FR-5.3   A memory-mapped region shall expose: coherence status, event counters (invalidations, hits, misses),  MUST
+FR-5.4   doorbell, UART regs.                                                                                  SHOULD
+         Error/unmapped accesses shall return a defined error response (SLVERR/DECERR).
+
+FR-6: Debug & Visibility
+
+ID       Requirement                                                                                           Priority
+FR-6.1   Coherence status and event counters shall be readable via MMIO.                                       MUST
+FR-6.2   UART shall output a human-readable log of coherence events and shared-data values.                    MUST
+FR-6.3   LEDs shall indicate core activity and coherence events (heartbeat + event pulse).                     MUST
+
+6. Non-Functional Requirements
+
+NFR-1: Synthesizability
+
+ID       Requirement                                                                                           Priority
+                                                                                                               MUST
+NFR-1.1  All RTL shall be synthesizable -- no initial blocks for logic, no $display in synthesizable code, no  MUST
+                                                                                                               MUST
+         behavioral-only constructs.
+
+NFR-1.2 No inferred latches. All sequential logic shall use explicit clock + async reset.
+
+NFR-1.3  SRAM shall be implementable as either OpenRAM macros or register arrays (both must pass
+         synthesis).
+
+NFR-2: Timing
+
+ID       Requirement                                                                                           Priority
+NFR-2.1  The design shall meet timing at 20 MHz on sky130A (50 ns period).                                     MUST
+NFR-2.2  On FPGA, the design shall run at 50 MHz core clock (via MMCM/PLL).                                    MUST
+
+NFR-3: Verification
+
+ID       Requirement                                                                                           Priority
+NFR-3.1                                                                                                        MUST
+ID       Requirement                                                                                           Priority
+         A directed, self-checking SystemVerilog testbench shall cover reset, normal, conflict, and coherence
+NFR-3.2  cases.                                                                                                MUST
+NFR-3.3                                                                                                        MUST
+NFR-3.4  A UVM environment shall cover concurrent accesses, hit/miss, invalidation, simultaneous writes,       MUST
+         reset, and error conditions.
+
+         Functional coverage shall track coherence states, events, hit/miss, and error cases.
+
+         Code coverage (line/toggle/branch) shall be reported.
+
+NFR-4: Physical Design
+
+ID       Requirement                                                                                           Priority
+         OpenLane flow shall run to completion: synthesis  floorplan  power plan  placement  CTS 
+NFR-4.1  routing  sign-off.                                                                                    MUST
+         DRC shall be clean (0 violations).
+NFR-4.2  LVS shall be clean (netlist match).                                                                   MUST
+NFR-4.3  Reports shall include: area, timing (WNS/TNS setup & hold), power, congestion.                        MUST
+NFR-4.4  Final layout screenshots shall be captured.                                                           MUST
+NFR-4.5                                                                                                        MUST
+
+NFR-5: FPGA Demonstration
+
+ID       Requirement                                                                                           Priority
+NFR-5.1  The design shall synthesize and run on the chosen FPGA board.                                         MUST
+NFR-5.2  The demo shall show: core 0 writes shared data  coherence invalidation  core 1 reads updated          MUST
+NFR-5.3  value.                                                                                                MUST
+         UART shall print the before/after values; LEDs shall show event activity.
+
+7. Scope Boundaries
+
+In Scope
+
+  · Two RV32I single-cycle cores.
+  · Private I-SRAMs, private D-caches (2-4 lines).
+  · 3-state (I/S/M) invalidation-based coherence.
+  · AXI4-Lite interconnect + arbiter.
+  · Shared data SRAM + MMIO debug registers.
+  · UART + LED status.
+  · Directed SV testbench.
+  · UVM verification environment with coverage.
+  · OpenLane synthesis  GDS on sky130A.
+  · FPGA demo on Arty A7-100T or Zybo.
+
+Out of Scope (explicitly excluded by the brief)
+
+  · Pipelined cores.
+  · L2 / multi-level cache hierarchies.
+  · MESI/MOESI or scalable directory/snooping protocols.
+· DRAM controllers.
+· Interrupts, exceptions, privileged CSRs.
+· Zynq PS-side software (if Zybo is used, PL-only).
+· Multi-master AXI4 (full AXI4 with bursts).
+
+8. Acceptance Criteria
+
+The project is accepted when all of the following are demonstrably true:
+
+#      Criterion                                            How Verified
+AC-1                                                        Directed TB: core PC advances, correct instruction
+       Both cores execute RV32I programs from private I-    results.
+       SRAM.                                                Directed TB: hit returns cached data, miss fetches from
+                                                            SRAM.
+AC-2 Cache hit/miss behavior is correct.                    Directed TB: writeread back same value on same core.
+                                                            Directed TB: core 0 writes, core 1's line  I, core 1
+AC-3 Shared-memory reads/writes are correct.                refetches updated value.
+
+AC-4 Coherence invalidation works.                          Directed TB: core 1 reads new value, not stale.
+
+AC-5   Updated data is visible to the other core after      Directed TB: simultaneous writes produce deterministic
+       invalidation.                                        winner.
+AC-6                                                        Directed TB: post-reset, all caches = I, all regs = 0.
+AC-7   Arbitration handles simultaneous accesses            Directed TB: unmapped access returns SLVERR/DECERR.
+AC-8   deterministically.
+AC-9                                                        UVM logs + coverage report.
+       Reset initializes all state to known values.
+AC-10                                                       OpenLane logs + KLayout LVS report.
+AC-11  Error conditions are handled.
+AC-12                                                       OpenLane report files.
+AC-13  UVM environment passes with functional + code
+       coverage reported.                                   Live board demo or video capture.
+
+       OpenLane flow completes with DRC clean + LVS         Document exists and covers all modules.
+       clean.
+
+       Area/timing/power/congestion reports are generated.
+
+       FPGA demo runs and shows coherence via UART +
+       LEDs.
+
+       Brief architecture document is delivered.
+
+9. Deliverables Checklist
+
+          Synthesizable RTL (all modules)
+          Dual RV32I core integration
+          Instruction/shared SRAM integration
+          Private cache/buffer subsystem
+          Simplified coherence controller
+          AXI4-Lite bus/control interface
+          Coherence status/debug registers
+          UART + GPIO status interface
+          Directed self-checking SV testbench
+          UVM verification environment + coverage reports
+          Timing constraints (SDC)
+Synthesis report
+Physical-design reports (area/timing/power/congestion/DRC/LVS)
+Final layout screenshots
+FPGA bitstream + demo
+Brief architecture document
+
+10. Risks & Mitigations
+
+Risk                                              Impact    Mitigation
+RV32I core bugs poison all downstream work.       Critical
+Coherence "works" but stale register value hides            Use a known-good single-cycle core; unit-test the core in
+the bug.                                          High      isolation first.
+AXI4-Lite handshake bugs.                         High
+OpenLane fails on unsynthesizable constructs.     High      Design demo SW to re-read after invalidation, not reuse
+                                                            register value.
+OpenRAM macro integration eats time.              Medium
+UVM scope creep.                                  Medium    Write AXI-Lite BFMs early; test each channel in isolation.
+FPGA timing misses at 50 MHz.                     Low
+                                                            Yosys smoke test on day 3; avoid latches, use proper
+                                                            resets.
+
+                                                            Use register arrays for I-SRAM; decide shared SRAM
+                                                            strategy on day 1.
+
+                                                            Directed TB first; UVM layered on top; keep agents minimal.
+
+                                                            MMCM from board ref clock; retiming/pipelining if needed.
+
+11. Glossary
+
+Term           Meaning
+RV32I          RISC-V 32-bit base integer ISA (no compressed, no float, no CSR).
+I/S/M          Invalid / Shared / Modified -- the 3 cache coherence states.
+Write-through  On write, update both cache and shared SRAM simultaneously.
+Invalidation   Marking a remote cache line stale (I) so it must be refetched.
+AXI4-Lite      Simplified AXI4: 5 channels, no bursts, single transaction per channel.
+OpenLane       Open-source ASIC flow (Yosys + OpenROAD) for sky130.
+DRC            Design Rule Check -- verifies layout against PDK rules.
+LVS            Layout Versus Schematic -- verifies layout matches netlist.
+
